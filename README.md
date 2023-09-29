@@ -64,3 +64,13 @@ $ forge --help
 $ anvil --help
 $ cast --help
 ```
+
+1. (Relative Stability) ANchored or Pegged -> $1.00
+   1. ChainLink Price Feed
+   2. Set a function to exchange ETH & BTC -> $$$
+2. Stability Mechanism (MInting): ALgorithmic (Decentralized)
+   1. People can only mint the stablecoin with enough collateral (coded)
+3. Collateral: Exogenous (Crypto) [Wrapped Version which is ERC20]
+   1. wETH
+   2. wBTC
+
