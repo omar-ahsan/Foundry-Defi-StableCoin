@@ -1,103 +1,128 @@
-//SPDX-License-Identifier: MIT
+// Layout of Contract:
+// version
+// imports
+// errors
+// interfaces, libraries, contracts
+// Type declarations
+// State variables
+// Events
+// Modifiers
+// Functions
 
-pragma solidity ^0.8.18;
+// Layout of Functions:
+// constructor
+// receive function (if exists)
+// fallback function (if exists)
+// external
+// public
+// internal
+// private
+// internal & private view & pure functions
+// external & public view & pure functions
 
-import {DecentralizedStableCoin} from "./DecentralizedStableCoin.sol";
+// SPDX-License-Identifier: MIT
+
+pragma solidity 0.8.19;
+
 import {ReentrancyGuard} from "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {DecentralizedStableCoin} from "./DecentralizedStableCoin.sol";
 import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
 
-/**
+/*
  * @title DSCEngine
- * @author Omar Ahsan
- * The system is designed to be as minimal as possible, and have   the tokens maintain a 1 token == $1 peg.
- * This stablecoin has the properties:
- * - Exogenous Collateral
+ * @author Patrick Collins
+ *
+ * The system is designed to be as minimal as possible, and have the tokens maintain a 1 token == $1 peg at all times.
+ * This is a stablecoin with the properties:
+ * - Exogenously Collateralized
  * - Dollar Pegged
  * - Algorithmically Stable
  *
- *  Our DSC system should always be "overcollateralized". At no point, should the value of all collateral <= the $ backed value of all the DSC.
+ * It is similar to DAI if DAI had no governance, no fees, and was backed by only WETH and WBTC.
  *
- * It is similar to DAI if DAI had no governance, no fees, and was only backed by WETH and WBTC.
- * @notice This contract is the core of the DSC System. It handles all the logic for mining and redeeming DSC, as well as depositing & withdrawing collateral.
- * @notice This contract is very loosely based on the MakerDAO DSS (DAI) system.
+ * @notice This contract is the core of the Decentralized Stablecoin system. It handles all the logic
+ * for minting and redeeming DSC, as well as depositing and withdrawing collateral.
+ * @notice This contract is based on the MakerDAO DSS system
  */
-
 contract DSCEngine is ReentrancyGuard {
-    //////////////
-    // Errors //
-    //////////////
-    error DSCEngine_NeedsMoreThanZero();
-    error DSCEngine_TokenAddressesAndPriceFeedAddressesMustBeSame();
-    error DSCEngine_NotAllowedToken();
-    error DSCEngine_TransferFailed();
-    error DSCEngine_BreaksHealthFactor(uint256 healthFactor);
-    error DSCEngine_MintFailed();
-    error DSCEngine_HealthFactorOk();
-    error DSCEngine_HealthFactorNotImproved();
-    error DSCEngine_TokenAddressesAndPriceFeedAddressesAmountsDontMatch();
+    ///////////////////
+    // Errors
+    ///////////////////
+    error DSCEngine__TokenAddressesAndPriceFeedAddressesAmountsDontMatch();
+    error DSCEngine__NeedsMoreThanZero();
+    error DSCEngine__TokenNotAllowed(address token);
+    error DSCEngine__TransferFailed();
+    error DSCEngine__BreaksHealthFactor(uint256 healthFactorValue);
+    error DSCEngine__MintFailed();
+    error DSCEngine__HealthFactorOk();
+    error DSCEngine__HealthFactorNotImproved();
 
     ///////////////////
-    // State Variables //
+    // State Variables
     ///////////////////
-    uint256 private constant ADDITIONAL_FEED_PRECISION = 1e10;
-    uint256 private constant PRECISION = 1e18;
-    uint256 private constant LIQUIDATION_THRESHOLD = 50;
-    uint256 private constant LIQUIDATION_PRECISION = 100;
-    uint256 private constant MIN_HEALTH_FACTOR = 1e18;
-    uint256 private constant LIQUIDATION_BONUS = 10;
-
-    mapping(address token => address priceFeed) private s_priceFeeds;
-    mapping(address user => mapping(address token => uint256 amount))
-        private s_collateralDeposited;
-    mapping(address user => uint256 amountDscMinted) private s_DSCMinted;
-    address[] private s_collateralTokens;
-
     DecentralizedStableCoin private immutable i_dsc;
 
+    uint256 private constant LIQUIDATION_THRESHOLD = 50; // This means you need to be 200% over-collateralized
+    uint256 private constant LIQUIDATION_BONUS = 10; // This means you get assets at a 10% discount when liquidating
+    uint256 private constant LIQUIDATION_PRECISION = 100;
+    uint256 private constant MIN_HEALTH_FACTOR = 1e18;
+    uint256 private constant PRECISION = 1e18;
+    uint256 private constant ADDITIONAL_FEED_PRECISION = 1e10;
+    uint256 private constant FEED_PRECISION = 1e8;
+
+    /// @dev Mapping of token address to price feed address
+    mapping(address collateralToken => address priceFeed) private s_priceFeeds;
+    /// @dev Amount of collateral deposited by user
+    mapping(address user => mapping(address collateralToken => uint256 amount))
+        private s_collateralDeposited;
+    /// @dev Amount of DSC minted by user
+    mapping(address user => uint256 amount) private s_DSCMinted;
+    /// @dev If we know exactly how many tokens we have, we could make this immutable!
+    address[] private s_collateralTokens;
+
     ///////////////////
-    // Event //
+    // Events
     ///////////////////
     event CollateralDeposited(
         address indexed user,
         address indexed token,
         uint256 indexed amount
     );
-
     event CollateralRedeemed(
-        address indexed redeemedFrom,
-        address indexed redeenedTo,
-        address indexed token,
+        address indexed redeemFrom,
+        address indexed redeemTo,
+        address token,
         uint256 amount
-    );
+    ); // if redeemFrom != redeemedTo, then it was liquidated
 
-    //////////////
-    // Modifiers //
-    //////////////
+    ///////////////////
+    // Modifiers
+    ///////////////////
     modifier moreThanZero(uint256 amount) {
         if (amount == 0) {
-            revert DSCEngine_NeedsMoreThanZero();
+            revert DSCEngine__NeedsMoreThanZero();
         }
         _;
     }
 
     modifier isAllowedToken(address token) {
         if (s_priceFeeds[token] == address(0)) {
-            revert DSCEngine_NotAllowedToken();
+            revert DSCEngine__TokenNotAllowed(token);
         }
         _;
     }
 
-    //////////////
-    // Functions //
-    //////////////
+    ///////////////////
+    // Functions
+    ///////////////////
     constructor(
         address[] memory tokenAddresses,
         address[] memory priceFeedAddresses,
         address dscAddress
     ) {
         if (tokenAddresses.length != priceFeedAddresses.length) {
-            revert DSCEngine_TokenAddressesAndPriceFeedAddressesAmountsDontMatch();
+            revert DSCEngine__TokenAddressesAndPriceFeedAddressesAmountsDontMatch();
         }
         // These feeds will be the USD pairs
         // For example ETH / USD or MKR / USD
@@ -196,7 +221,7 @@ contract DSCEngine is ReentrancyGuard {
     ) external moreThanZero(debtToCover) nonReentrant {
         uint256 startingUserHealthFactor = _healthFactor(user);
         if (startingUserHealthFactor >= MIN_HEALTH_FACTOR) {
-            revert DSCEngine_HealthFactorOk();
+            revert DSCEngine__HealthFactorOk();
         }
         // If covering 100 DSC, we need to $100 of collateral
         uint256 tokenAmountFromDebtCovered = getTokenAmountFromUsd(
@@ -222,7 +247,7 @@ contract DSCEngine is ReentrancyGuard {
         uint256 endingUserHealthFactor = _healthFactor(user);
         // This conditional should never hit, but just in case
         if (endingUserHealthFactor <= startingUserHealthFactor) {
-            revert DSCEngine_HealthFactorNotImproved();
+            revert DSCEngine__HealthFactorNotImproved();
         }
         revertIfHealthFactorIsBroken(msg.sender);
     }
@@ -242,7 +267,7 @@ contract DSCEngine is ReentrancyGuard {
         bool minted = i_dsc.mint(msg.sender, amountDscToMint);
 
         if (minted != true) {
-            revert DSCEngine_MintFailed();
+            revert DSCEngine__MintFailed();
         }
     }
 
@@ -273,7 +298,7 @@ contract DSCEngine is ReentrancyGuard {
             amountCollateral
         );
         if (!success) {
-            revert DSCEngine_TransferFailed();
+            revert DSCEngine__TransferFailed();
         }
     }
 
@@ -298,7 +323,7 @@ contract DSCEngine is ReentrancyGuard {
             amountCollateral
         );
         if (!success) {
-            revert DSCEngine_TransferFailed();
+            revert DSCEngine__TransferFailed();
         }
     }
 
@@ -316,7 +341,7 @@ contract DSCEngine is ReentrancyGuard {
         );
         // This conditional is hypothetically unreachable
         if (!success) {
-            revert DSCEngine_TransferFailed();
+            revert DSCEngine__TransferFailed();
         }
         i_dsc.burn(amountDscToBurn);
     }
@@ -373,7 +398,7 @@ contract DSCEngine is ReentrancyGuard {
     function revertIfHealthFactorIsBroken(address user) internal view {
         uint256 userHealthFactor = _healthFactor(user);
         if (userHealthFactor < MIN_HEALTH_FACTOR) {
-            revert DSCEngine_BreaksHealthFactor(userHealthFactor);
+            revert DSCEngine__BreaksHealthFactor(userHealthFactor);
         }
     }
 
